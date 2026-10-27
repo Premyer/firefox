@@ -1,0 +1,82 @@
+name: Fenix Android Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/veil-fenix-apk.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fenix-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE: system
+      MOZ_CRASHREPORTER_NO_REPORT: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Free space on disposable runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          df -h
+      - name: Configure Android artifact build
+        run: |
+          cat > mozconfig <<'EOF'
+          ac_add_options --enable-application=mobile/android
+          ac_add_options --target=aarch64-linux-android
+          ac_add_options --enable-artifact-builds
+          mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-android
+          mk_add_options MOZ_MAKE_FLAGS=-j2
+          EOF
+      - name: Bootstrap Mozilla build environment
+        run: |
+          set -o pipefail
+          ./mach --no-interactive bootstrap --application-choice mobile_android_artifact_mode --no-agentic-tools 2>&1 | tee bootstrap.log
+      - name: Build Android components
+        run: |
+          set -o pipefail
+          ./mach build 2>&1 | tee build.log
+      - name: Build Fenix debug APK
+        run: |
+          set -o pipefail
+          ./mach gradle :fenix:assembleDebug -PdisableLeakCanary --no-daemon --max-workers=2 2>&1 | tee fenix-apk.log
+      - name: Collect APKs and checksums
+        run: |
+          mkdir -p apk-output
+          find obj-android mobile/android/fenix -type f -path '*/outputs/apk/*' -name '*.apk' -exec cp {} apk-output/ \;
+          test -n "$(find apk-output -name '*.apk' -print -quit)"
+          sha256sum apk-output/*.apk > apk-output/SHA256SUMS.txt
+          git rev-parse HEAD > apk-output/SOURCE_COMMIT.txt
+      - name: Upload debug APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: fenix-debug-apks-${{ github.sha }}
+          path: apk-output/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fenix-build-logs-${{ github.sha }}
+          path: |
+            bootstrap.log
+            build.log
+            fenix-apk.log
+          if-no-files-found: ignore
+          retention-days: 7
